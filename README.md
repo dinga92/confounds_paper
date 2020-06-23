@@ -1,6 +1,6 @@
 # confounds_paper
 resources to preprint XXXXXXXX
 
-Hi, I am sorry if you found this before I uploaded the preprint. I promise it will be out soon.
+Hi, didn't expect you to be here this soon. The preprint will appear in a couple of days. 
 
-You can follow me on twitter or send me an email to get the update when it's out
+You can follow me on twitter or send me an email if you want to get a notiffication when it's out. 
