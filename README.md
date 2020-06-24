@@ -1,6 +1,4 @@
 # confounds_paper
-resources to preprint XXXXXXXX
+resources to preprint Controlling for effects of confounding variables on machine learning predictions
 
-Hi, didn't expect you to be here this soon. The preprint will appear in a couple of days. 
-
-You can follow me on twitter or send me an email if you want to get a notiffication when it's out. 
+Hi, the preprint is not out yet, but the prepreprint is here https://github.com/dinga92/confounds_paper/blob/master/confounds_ml_prepreprint_dinga_etal2020.pdf code is not available yet, but it will be once I submit this 
