@@ -1,0 +1,245 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(data.table)  # for fast reading of csv files
+
+# load ROI volume data, to do this, I will first have to load 
+# variable names from a separate file 
+var_names <- fread('ukbb_data/volumes_names.csv')$`Field ID`
+var_names <- paste0(var_names, '-2.0')
+var_names <- c('eid', var_names)
+
+# load volumes
+df_volumes <- fread('ukbb_data/brain_IDPs.csv',
+                    select=var_names)
+
+# change variable names to match names from my volumes_names.csv file
+# strip everything after '-' from names
+names(df_volumes)[-1] <- unlist(lapply(names(df_volumes)[-1], 
+                          function(x)strsplit(x, '-')[[1]][[1]]))
+
+# select only variables that are in the volumes_names.csv file
+selected_columns <- c(names(df_volumes) %in% var_names)
+# throw away missings
+df_volumes <- df_volumes[!is.na(df_volumes$`25000`),]  
+
+# now loading specific demographic, cognitive, and lifestyle variables
+df_demo <- fread('ukbb_data/basic_demographics.csv',
+                 select = c('eid', '31-0.0', '21022-0.0'))
+df_demo <- df_demo[df_demo$eid %in% df_volumes$eid,]
+df_cognitive <- fread('ukbb_data/cognitive_phenotypes.csv',
+                      select = c('eid', "20016-2.0"))
+df_cognitive <- df_cognitive[df_cognitive$eid %in% df_volumes$eid,]
+df_lifestyle <- fread('ukbb_data/lifestyle_environment_exercise_work.csv',
+                      select = c('eid', '845-0.0'))
+
+# merge previously loaded dataframes into one 
+df_covariates <- merge(df_volumes[, c('eid', '25000', '25010')], df_demo)
+df_covariates <- merge(df_covariates, df_cognitive)
+df_covariates <- merge(df_covariates, df_lifestyle)
+
+# rename ukbb numeric codes to verbose variable names
+names(df_covariates) <- c('eid', 't1_scaling', 'brain.size', 'sex',
+                          'age', 'fluid_int', 'edu_age')
+
+# put the subjects in df_covaraites to the same order as subjects in
+# df_volumes
+df_covariates <- df_covariates[order(df_covariates$eid, df_volumes$eid),]
+
+# sanity check
+if (!all(df_covariates$eid == df_volumes$eid)){
+  stop('data frames not in the same order')
+}
+
+# delete unused dataframes
+rm(df_demo, df_cognitive, df_lifestyle)
+```
+
+
+
+
+```{r}
+library(caret)
+library(glmnet)
+
+# delete cases with missing volumes or fluid int
+df_volumes <- df_volumes[complete.cases(cbind(
+                df_volumes, df_covariates$fluid_int)),]
+df_covariates <- df_covariates[df_covariates$eid %in% df_volumes$eid,]
+
+# get rid of subjid column, (should be fine, since we ordered dataframes
+# in the previous step
+df_volumes <- df_volumes[,-1]
+df_covariates <- df_covariates[,-1]
+
+# train/test split
+train_idx <- createDataPartition(df_covariates$fluid_int, list = F)
+df_train_volumes <- df_volumes[train_idx,]
+df_train_covariates <- df_covariates[train_idx,]
+df_test_volumes <- df_volumes[-train_idx,]
+df_test_covariates <- df_covariates[-train_idx,]
+
+# fit ridge regression
+m_glmnet1 <- cv.glmnet(as.matrix(df_train_volumes),
+                       df_train_covariates$fluid_int,
+                       family='gaussian',
+                       type.measure = 'mse',
+                       alpha=0)
+
+# make predictions
+df_test_covariates$predictions <- predict(m_glmnet1,
+                                    newx = as.matrix(df_test_volumes), 
+                                    s='lambda.min')
+```
+
+
+
+```{r}
+decompose_r2 <- function(m_conf, m_pred, m_conf_pred){
+  r2_conf <- summary(m_conf)$r.squared
+  r2_pred <- summary(m_pred)$r.squared
+  r2_conf_pred <- summary(m_conf_pred)$r.squared
+  
+  conf_unexplained <- 1 - r2_conf
+  pred_unexplained <- 1 - r2_pred
+  
+  delta_pred <- r2_conf_pred - r2_conf
+  delta_conf <- r2_conf_pred - r2_pred
+  
+  partial_pred <- delta_pred / conf_unexplained
+  partial_conf <- delta_conf / pred_unexplained
+  
+  shared = r2_conf_pred - delta_conf - delta_pred
+  
+  res <- c('confounds' = r2_conf,
+           'predictions' = r2_pred,
+           'confounds+predictions' = r2_conf_pred,
+           'delta confounds' = delta_conf,
+           'delta predictions' = delta_pred,
+           'partial confounds' = partial_conf,
+           'partial predicitons' = partial_pred,
+           'shared' = shared)
+  res <- as.data.frame(res)
+  res$r2_type <- rownames(res)
+  return(res)
+}
+
+
+library(splines)
+
+# throw away subjects from the test set with missing edu_age
+df_test_covariates <- df_test_covariates[
+                        !is.na(df_test_covariates$edu_age),]
+
+# fit models we will compare
+# 1. model with only confounds as predictors 
+# + (nonlinear expansions using splines)
+m_conf <- lm(fluid_int ~ bs(edu_age, df=5), data=df_test_covariates)
+# 2. model with only ML predictions as predictors
+m_pred <- lm(fluid_int ~ predictions, data=df_test_covariates)
+# 3. model with both ML predictions and confounds as covariates
+m_conf_pred <- lm(fluid_int ~ bs(edu_age, df=5) + predictions,
+                  data=df_test_covariates)
+
+# same as above, but having brain size as a confound
+m_conf2 <- lm(fluid_int ~ brain.size, data=df_test_covariates)
+m_pred2 <- lm(fluid_int ~ predictions, data=df_test_covariates)
+m_conf_pred2 <- lm(fluid_int ~ brain.size + predictions, 
+                   data=df_test_covariates)
+
+# get partial and delta r2 for education confounds
+decomposed_r2 <- decompose_r2(m_conf, m_pred, m_conf_pred)
+# and for brain.size confounds
+decomposed_r2_2 <- decompose_r2(m_conf2, m_pred2, m_conf_pred2)
+```
+
+here we explore various decomposed r2, either by using our helper function,
+or using the summary function. P-values and other desired statistical measures,
+could be obtained from the respective models using the summary function
+
+```{r}
+decomposed_r2
+summary(m_conf)
+summary(m_pred)
+summary(m_conf_pred)
+```
+
+```{r}
+decomposed_r2_2
+summary(m_conf2)
+summary(m_pred2)
+summary(m_conf_pred2)
+```
+
+
+```{r}
+# make a table for  future plotting
+t1 <- decomposed_r2[c(1:5,8),]
+t1$conf <- 'education'
+t2 <- decomposed_r2_2[c(1:5,8),]
+t2$conf <- 'brain size'
+
+t1 <- rbind(t1, t2)
+t1
+```
+
+plot
+
+```{r}
+library(colorblindr)
+library(cowplot)
+
+t_small <- t1[t1$r2_type %in% 
+                c('delta predictions', 'shared', 'delta confounds'),]
+
+t_small$r2_type <- factor(t_small$r2_type,
+                          levels=rev(c('delta predictions',
+                              'shared',
+                              'delta confounds')),
+                          labels=c('confounds only',
+                                   'confounds + predictions', 
+                                   'predictions only'
+                                   ))
+
+p <- ggplot(t_small, aes(y=res, x=conf, fill=r2_type)) +
+  geom_bar(stat='identity') +
+  coord_flip() +
+  labs(y=expression( R^{2}),
+       x='Confound') +
+  theme_minimal_vgrid() +
+  theme(aspect.ratio = 0.25) +
+  scale_fill_manual(values = c("#F0E442", "#9CCA9D", "#56B4E9"),
+                    name='Variance explained by')
+p
+
+ggsave('p_r2.png',
+       p, width = 140, height = 50, units = 'mm')
+```
+
+decomposition for D^2
+
+```{r}
+library(modEvA)
+
+decompose_d2 <- function(m1, m2){
+  r2_1 <- Dsquared(m1)
+  r2_2 <- Dsquared(m2)
+  res_r2 <- 1 - r2_1
+  delta_r2 <- r2_2 - r2_1
+  partial_r2 <- delta_r2 / res_r2
+  shared_r2 <- 
+  return(c('r2 m1' = r2_1,
+           'r2 m2' = r2_2,
+           'r2 residual' = res_r2,
+           'r2 delta' = delta_r2,
+           'r2 partial' = partial_r2))
+}
+```
